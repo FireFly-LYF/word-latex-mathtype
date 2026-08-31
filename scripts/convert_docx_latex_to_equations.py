@@ -67,9 +67,10 @@ INLINE_PATTERNS = [
     r"\[0,t_\{\\mathrm\{on\}\}\)",
     r"\[t_\{\\mathrm\{on\}\},t_\{\\mathrm\{off\}\}\)",
     r"\[t_\{\\mathrm\{off\}\},1\]",
+    r"\[t_\{\\mathrm\{off\}\},1\)",
     r"ratio\^\\alpha",
     r"Q_[A-Za-z0-9{}]+\\times\s*Q_[A-Za-z0-9{}]+(?:\\times\s*Q_[A-Za-z0-9{}]+)*",
-    r"[A-Za-z](?:_[A-Za-z0-9{}\\]+)+(?:\([^()\r\n]{0,80}\))?(?:\s*=\s*[^\u4e00-\u9fff]{1,120})",
+    r"[A-Za-z](?:_[A-Za-z0-9{}\\]+)+(?:\([^()\r\n]{0,80}\))?(?:\s*=\s*[^$\u4e00-\u9fff\u3000-\u303f]{1,80})",
     r"\\alpha\s*[<>=]\s*1",
     r"\\alpha",
     r"k_[0-9]+",
@@ -159,13 +160,16 @@ def is_display_formula_paragraph(text: str) -> bool:
         return False
     if is_ascii_identifier_like(normalized):
         return False
+    # Explicit $$...$$ / \[...\] display delimiters always count as display.
+    if re.match(r"^\$\$.*\$\$$", normalized) or re.match(r"^\\\[.*\\\]$", normalized):
+        return True
     if ";" in normalized and not re.search(r"\\|[{}]|\^", normalized):
         return False
     if not re.search(r"\\|_|\^|[{}]", normalized):
         return False
     if not re.search(r"[\u4e00-\u9fff]", normalized):
         return True
-    return bool(re.match(r"^(\\|[A-Za-z].*[=<>])", normalized))
+    return bool(re.match(r"^(\$\$|\\\[|\\|\$?[A-Za-z].*[=<>])", normalized))
 
 
 def should_skip_inline_match(text: str) -> bool:
@@ -181,6 +185,23 @@ def should_skip_inline_match(text: str) -> bool:
 
 def get_inline_formula_matches(text: str) -> list[dict]:
     candidates: list[dict] = []
+
+    # Prefer explicit $...$ / \(...\) wrappers (single-line).
+    # Delimited math is author-marked: never skip as plain identifiers.
+    for match in re.finditer(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", text):
+        value = match.group(1).strip()
+        if not value:
+            continue
+        candidates.append(
+            {
+                "start": match.start(),
+                "length": match.end() - match.start(),
+                "end": match.end(),
+                "text": value,
+                "delimited": True,
+            }
+        )
+
     for pattern in INLINE_PATTERNS:
         for match in re.finditer(pattern, text):
             value = match.group(0).strip()
@@ -192,6 +213,7 @@ def get_inline_formula_matches(text: str) -> list[dict]:
                     "length": match.end() - match.start(),
                     "end": match.end(),
                     "text": value,
+                    "delimited": False,
                 }
             )
 
@@ -278,7 +300,8 @@ def try_convert_range_with_mathtype(word, doc_range, formula: str, mode: str = "
             shape = find_inline_shape_near_start(document, start, start + len(wrapped) + 2)
             if shape is None and document.InlineShapes.Count > 0:
                 shape = document.InlineShapes(document.InlineShapes.Count)
-            if shape is not None and mode == "Display" and wrapped.startswith("$$"):
+            if shape is not None:
+                # Display wraps with $$; inline matches often sit inside existing $...$.
                 remove_adjacent_literal_dollars(shape)
             end = shape.Range.End if shape is not None else start + len(wrapped)
             return {
@@ -542,7 +565,7 @@ def convert_docx(
 
             for match in matches:
                 formula = match["text"].strip()
-                if should_skip_inline_match(formula):
+                if (not match.get("delimited")) and should_skip_inline_match(formula):
                     summary["skipped"] += 1
                     events.append(
                         {

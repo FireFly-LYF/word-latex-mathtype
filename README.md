@@ -15,7 +15,8 @@
 - Silent Word automation: `WINWORD.EXE docx /q` + Python `win32com`
 - MathType via **TeX Toggle** (`MTCommand_TeXToggle`) — no GUI, no manual close
 - Produces `Equation.DSMT4` OLE with **DSMT7** payload (compatible with manual MathType equations)
-- Display + inline LaTeX detection with conservative matching (fewer false positives)
+- Display + inline LaTeX detection: prefers explicit `$...$` / `$$...$$`, then conservative bare heuristics
+- Strips leftover `$` delimiters after TeX toggle (inline and display)
 - Automatic fallback to **Word native OMath** when MathType toggle fails
 - JSON conversion log for auditing
 - Optional **Cursor Agent Skill** (`SKILL.md`) for AI-assisted workflows
@@ -131,6 +132,23 @@ Copy or clone this repo into your Cursor skills folder, e.g.:
 
 Cursor will load `SKILL.md` when you ask to convert docx formulas to MathType.
 
+## Source conventions
+
+Prefer author-delimited math so detection is unambiguous:
+
+| Kind | Write as |
+|------|----------|
+| Display | Own paragraph: `$$...$$` |
+| Inline | `$...$` (including simple vars like `$t$`, `$N$`) |
+
+Matching order inside the converter:
+
+1. Display paragraphs (`$$...$$` / `\[...\]` / whole-paragraph LaTeX)
+2. Explicit `$...$` spans — **always convert** (never treated as plain identifiers)
+3. Bare heuristic `INLINE_PATTERNS` (legacy undelimited text only)
+
+Always convert from a **clean LaTeX source** into a new `--target`. Paragraphs that already contain OLE/OMath are skipped as a whole (`skipped-existing-object`), so re-running on a half-converted `_formula.docx` will not finish remaining `$...$` text.
+
 ## FAQ
 
 **PowerShell `New-Object Word.Application` fails with `TYPE_E_CANTLOADLIBRARY`**
@@ -141,9 +159,17 @@ Use the default **Python** path. Do not use `-UseLegacy` unless you need legacy 
 
 Close the output `.docx` in Word before re-running.
 
+**Leftover `$$` shells or fragments like `$[,1)$`**
+
+Older builds matched heuristic patterns *inside* `$...$` and left the dollars behind; inline mode also skipped stripping adjacent `$`. Current script matches full `$...$` spans first and strips adjacent `$` after every successful toggle. Re-convert from the clean source.
+
+**Simple `$t$` / `$N$` left as literal dollars**
+
+Author-delimited `$...$` must not be skipped as ASCII identifiers. Current script marks those matches `delimited=True` and always converts them.
+
 **Formulas not detected**
 
-Source paragraphs must contain LaTeX markers (`\_`, `\mathrm`, `{`, etc.). Plain `Pd` without subscripts is intentionally skipped.
+Prefer wrapping with `$...$` / `$$...$$`. Undelimited text still needs LaTeX markers (`_`, `\mathrm`, `{`, etc.). Plain `Pd` without subscripts is intentionally skipped by the bare heuristic path.
 
 **Complex Chinese `\text{...}` display formulas**
 
