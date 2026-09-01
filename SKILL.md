@@ -64,22 +64,38 @@ Word OMath 回退：`--mathtype-mode word`
 
 推荐：行内公式一律写成 `$...$`，独立公式用 `$$...$$` 单独成段。不要只写裸 `t_{\mathrm{on}}` 再依赖启发式。
 
-### 已知失败模式与修复（2026-08）
+**禁止**把 Word 公式面板 / Unicode 数学（如 `r(t)=αs sT(t−τs)+…`）当作源。TeX Toggle 只吃 LaTeX 文本，例如：
+
+```text
+$$r(t)=\alpha_s\,s_T(t-\tau_s)+\alpha_j\,j(t)+n(t)$$
+```
+
+### 已知失败模式与修复
 
 | 现象 | 根因 | 修复 |
 |------|------|------|
-| 动作空间出现空的 `$$`、残片 `$[,1)$` | 旧版只匹配定界符**内部**的启发式模式，转换后留下两侧 `$`；且行内未清相邻 `$` | 优先整段匹配 `$...$`；成功后对 display/inline 都调用 `remove_adjacent_literal_dollars` |
-| `$t$`、`$B$`、`$N$` 仍留在正文 | `should_skip_inline_match` 把简单标识符当成非公式跳过 | 对 `delimited=True`（来自 `$...$`）的匹配不再 skip |
-| `u_m=0$。` 被吞进公式 | 赋值启发式模式把 `$`/标点吃进匹配 | 收紧赋值模式字符类，排除 `$` 与 CJK 标点 |
-| 重跑后半段仍是 LaTeX | 段内已有 OLE 时整段 `skipped-existing-object` | **始终从干净 LaTeX 源稿**生成新 target，勿对半成品 `_formula.docx` 再转 |
+| 动作空间空的 `$$`、残片 `$[,1)$` | 旧版只匹配 `$` 内部启发式；行内未清相邻 `$` | 优先整段 `$...$`；成功后剥相邻 `$` |
+| `$t$` / `$N$` 残留 | 简单标识符被 skip | `delimited=True` 不再 skip |
+| `u_m=0$。` 被吞 | 赋值启发式过宽 | 收紧字符类，排除 `$`/CJK 标点 |
+| display=0，段内是 `α`/`τ` Unicode | 粘贴的 Unicode 公式无 `\`/`$`，不被识别 | 先改写成 `$$...$$` LaTeX；日志 `skipped-unicode-math` |
+| 只转了新段、旧段大量 skipped | 源稿已合并过 OLE（把 `_formula` 写回主稿） | 主稿保持 LaTeX；OLE 只留在 `_formula.docx` |
+| 改稿脚本失败仍跑了转换 | Agent 未先校验源稿就 convert | **先 verify 源段含 `$$`/`$`，再 convert** |
+| 重跑半成品无效 | 有 OLE 的段整段跳过 | 始终从干净 LaTeX 源生成新 target |
 
-### Agent 执行清单
+### Agent 执行清单（门禁）
 
 1. 确认源/目标 docx 均未打开（无 `~$` 锁）
-2. `--source` = 含 `$...$` / `$$...$$` 的干净稿；`--target` 必须不同于 source
-3. 用本 skill 目录下的 `scripts/convert_docx_latex_to_equations.py`（勿用过时副本）
-4. 检查日志：`failed=0`；抽查 1.1 方法节 `dollar=False` 且 display 段有 OLE
-5. 若曾用旧脚本得到破损 `_formula.docx`，删除后从源稿重转
+2. **改完源稿后先抽查**：目标小节段落文本必须含 `$$...$$` 或 `$...$`，不能是 Unicode `α`/`τ`，也不能已是 OLE 空壳
+3. 改稿脚本若失败（SyntaxError / 编码错误）：**停止**，修好并重跑改稿，禁止接着 convert
+4. `--source` = 干净 LaTeX 主稿；`--target` ≠ source（通常 `*_formula.docx`）
+5. 只用本 skill 目录下 `scripts/convert_docx_latex_to_equations.py`
+6. 看日志：`failed=0`；关注 `unicodeSuspects` / `skipped-unicode-math` / `existingOLE`
+7. 抽查输出：目标节 `dollar=False` 且 display 段 `ole≥1`
+
+### Windows / 工具注意
+
+- 写含 `$` 的 Python/LaTeX 时，勿用 PowerShell 双引号或 `python -c "...$r(t)..."`（`$` 会被展开）。优先：`.py` 文件 + `python path.py`，或 `@'...'@ | Set-Content`
+- 含中文的 `.py` 若 Write 工具编码损坏，改用 `\uXXXX` 转义或 PowerShell `@' '@` 写入 UTF-8
 
 ### 限制
 
@@ -95,6 +111,8 @@ Headless `.docx` LaTeX → MathType OLE via `MTCommand_TeXToggle`. No MathType G
 python scripts/convert_docx_latex_to_equations.py --source input.docx
 ```
 
-**Matching order:** display `$$...$$` → explicit inline `$...$` (always convert) → bare `INLINE_PATTERNS`. Always convert from a clean LaTeX source; paragraphs that already contain OLE are skipped entirely.
+**Matching order:** display `$$...$$` → explicit inline `$...$` (always convert) → bare `INLINE_PATTERNS`.
+
+**Gate:** After editing the source, verify paragraphs contain real LaTeX (`$$` / `$` / `\alpha`), then convert. Unicode-pasted math is logged as `skipped-unicode-math`. Never convert a document whose body already stores OLE for the sections you still need to change—keep LaTeX in the source and OLE only in `_formula.docx`.
 
 Fallback: `--mathtype-mode word`. Legacy CJK: `-UseLegacy` on `.ps1`.

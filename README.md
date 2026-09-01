@@ -105,7 +105,9 @@ input.docx (LaTeX text in paragraphs)
 | `display-mathtype` / `inline-mathtype` | MathType conversion OK |
 | `word-omath` | Fallback to Word native equation |
 | `skipped-existing-object` | Paragraph already has OLE/OMath |
+| `skipped-unicode-math` | Pasted Unicode equation (α/τ/…), not LaTeX — rewrite as `$$...$$` |
 | `failed` | Both MathType and OMath failed |
+| `unicodeMathSuspects` / `existingObjectParagraphs` | Summary counters for the above skips |
 
 ## Project layout
 
@@ -166,6 +168,14 @@ Older builds matched heuristic patterns *inside* `$...$` and left the dollars be
 **Simple `$t$` / `$N$` left as literal dollars**
 
 Author-delimited `$...$` must not be skipped as ASCII identifiers. Current script marks those matches `delimited=True` and always converts them.
+
+**`display=0` but you see an equation that looks like `r(t)=α…`**
+
+That is Unicode/Word-equation paste, not LaTeX. TeX Toggle will not convert it. Rewrite as `$$r(t)=\alpha_s\,s_T(t-\tau_s)+\\ldots$$`. The converter logs `skipped-unicode-math` and prints `unicodeSuspects` in the summary.
+
+**Most paragraphs skipped / only a few new formulas convert**
+
+The source was probably merged with a previous `_formula.docx` (OLE already present). Keep the editable master as LaTeX-only; write MathType output only to `*_formula.docx`.
 
 **Formulas not detected**
 

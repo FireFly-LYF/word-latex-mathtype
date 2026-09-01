@@ -172,6 +172,28 @@ def is_display_formula_paragraph(text: str) -> bool:
     return bool(re.match(r"^(\$\$|\\\[|\\|\$?[A-Za-z].*[=<>])", normalized))
 
 
+# Word/Unicode math that looks convertible but is NOT TeX Toggle input.
+_UNICODE_MATH_MARKERS = re.compile(
+    r"[\u03b1-\u03c9\u0391-\u03a9]"  # Greek letters (α, τ, …)
+    r"|[\u2080-\u2089\u2090-\u209c\u2070-\u2079]"  # unicode super/subscripts
+    r"|[\u2212\u00d7\u00b7\u200b]"  # minus / times / ZWSP from Word equation paste
+)
+
+
+def looks_like_unconverted_unicode_math(text: str) -> bool:
+    """True for pasted Unicode equations like ``r(t)=αs sT(t−τs)+…`` without LaTeX."""
+    normalized = normalize_formula_text(text)
+    if not normalized or "$" in normalized or "\\" in normalized:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", normalized):
+        return False
+    if "=" not in normalized:
+        return False
+    if _UNICODE_MATH_MARKERS.search(normalized):
+        return True
+    return bool(re.search(r"[A-Za-z]\([^)]{0,24}\)\s*=", normalized) and len(normalized) <= 160)
+
+
 def should_skip_inline_match(text: str) -> bool:
     trimmed = text.strip()
     if not trimmed:
@@ -451,6 +473,8 @@ def convert_docx(
         "wordConverted": 0,
         "skipped": 0,
         "failed": 0,
+        "unicodeMathSuspects": 0,
+        "existingObjectParagraphs": 0,
     }
     events: list[dict] = []
 
@@ -488,6 +512,7 @@ def convert_docx(
 
             if paragraph.Range.OMaths.Count > 0 or paragraph.Range.InlineShapes.Count > 0:
                 summary["skipped"] += 1
+                summary["existingObjectParagraphs"] += 1
                 events.append(
                     {
                         "kind": "paragraph",
@@ -495,6 +520,24 @@ def convert_docx(
                         "engine": "none",
                         "status": "skipped-existing-object",
                         "formula": normalize_formula_text(body),
+                    }
+                )
+                continue
+
+            if looks_like_unconverted_unicode_math(body) and not is_display_formula_paragraph(body):
+                summary["skipped"] += 1
+                summary["unicodeMathSuspects"] += 1
+                events.append(
+                    {
+                        "kind": "display",
+                        "paragraphIndex": index,
+                        "engine": "none",
+                        "status": "skipped-unicode-math",
+                        "formula": normalize_formula_text(body),
+                        "message": (
+                            "Looks like pasted Unicode math, not LaTeX. "
+                            "Rewrite as $$...$$ with \\alpha, \\tau, etc. before converting."
+                        ),
                     }
                 )
                 continue
@@ -682,8 +725,22 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"mode={s.get('mathtypeMode', '?')} display={s['displayConverted']} inline={s['inlineConverted']} "
         f"mathtype={s['mathTypeConverted']} word={s['wordConverted']} "
-        f"skipped={s['skipped']} failed={s['failed']}"
+        f"skipped={s['skipped']} failed={s['failed']} "
+        f"unicodeSuspects={s.get('unicodeMathSuspects', 0)} "
+        f"existingOLE={s.get('existingObjectParagraphs', 0)}"
     )
+    if s.get("unicodeMathSuspects", 0):
+        print(
+            "WARNING: source has Unicode-math paragraphs (not LaTeX). "
+            "Rewrite as $$...$$ with \\\\commands before converting; see log status skipped-unicode-math.",
+            file=sys.stderr,
+        )
+    if s.get("existingObjectParagraphs", 0) and s["displayConverted"] + s["inlineConverted"] == 0:
+        print(
+            "WARNING: many paragraphs already contain OLE/OMath and were skipped. "
+            "Convert from a clean LaTeX source, not a previous _formula.docx merge.",
+            file=sys.stderr,
+        )
     print(f"target={target}")
     print(f"log={log_path}")
     return 0 if s["failed"] == 0 else 2
