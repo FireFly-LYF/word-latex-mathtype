@@ -81,6 +81,48 @@ $$r(t)=\alpha_s\,s_T(t-\tau_s)+\alpha_j\,j(t)+n(t)$$
 | 只转了新段、旧段大量 skipped | 源稿已合并过 OLE（把 `_formula` 写回主稿） | 主稿保持 LaTeX；OLE 只留在 `_formula.docx` |
 | 改稿脚本失败仍跑了转换 | Agent 未先校验源稿就 convert | **先 verify 源段含 `$$`/`$`，再 convert** |
 | 重跑半成品无效 | 有 OLE 的段整段跳过 | 始终从干净 LaTeX 源生成新 target |
+| **`failed=0` 但新段公式仍是 `$...$` 文本** | 段内**残留 OLE**（只改了 `run.text` 未删 `w:object`）；或 `display=0 inline=0` 全篇已是 OLE 壳 | 改稿用 **`clear_para_content` + 新 run + 字体/段落格式**（见下）；日志查 `skipped-existing-object` 是否落在你改的小节 |
+| **改完 1.3 节字体变 Calibri / 无缩进** | 用 `OxmlElement('w:r')` 或只写 `runs[0].text` 未恢复 **w:rPr / w:pPr** | 改稿后必须 **`set_run_fonts` + `set_body_para_format`**；display 段用 `set_display_para_format` |
+| 动作空间整段跳过、末尾残 `0,1` | 该段已有 InlineShapes，转换器整段 skip | 改稿前 **`para_has_embedded`** 必须为 False |
+| 把 `_formula.docx` 存回主稿 | 主稿混入 OLE，后续无法再 TeX Toggle | **主稿永远 LaTeX**；OLE 只写 `*_formula.docx` |
+
+### 改稿 + 转换标准流程（Agent 必遵）
+
+**顺序不可颠倒：改 LaTeX 源 → 校验字体/OLE/定界符 → convert → 校验日志小节范围。**
+
+1. **只改 `--source` 主稿**（`*_formula.docx` 只读预览/投稿，不作编辑源）
+2. **重写段落**时用 `scripts/docx_latex_helpers.py`（或等价逻辑）：
+   - `clear_para_content(para)` — 删 run/object，**保留 `w:pPr`**
+   - `para.add_run(latex_text)` + `set_run_fonts(run)` — 恢复中西文字体（默认：宋体 + Times New Roman + 五号）
+   - `set_body_para_format(para)` 或 `set_display_para_format(para)` — 恢复行距/对齐/首行缩进
+   - **禁止**仅 `runs[0].text = ...` 或裸 `OxmlElement('w:t')` 无 rFonts
+3. **转换前门禁**（源稿）：
+   - 目标小节 `para_has_embedded(para)` 全为 False
+   - 含公式段有 `$...$` / `$$...$$`（Unicode `α`/`τ` 不算）
+   - 抽查 run 的 `w:eastAsia` 与相邻正文段一致
+4. **转换**：`--source` ≠ `--target`；target 每次由脚本 `copy2` 覆盖
+5. **转换后门禁**（日志 + 输出）：
+   - `summary.failed == 0` **不够**
+   - 改稿小节对应 **Word 1-based 段号**内无 `skipped-existing-object`
+   - `inlineConverted` / `displayConverted` 与改稿量匹配（全 0 表示源稿已是 OLE 壳或未识别 LaTeX）
+   - 公式版该节 `ole≥1`、正文 `$` 已消失
+
+```python
+# 最小示例（项目内可 from docx_latex_helpers import ...）
+from docx_latex_helpers import (
+    set_para_latex_text,
+    para_has_embedded,
+    verify_paragraphs_latex,
+    verify_log_section,
+)
+
+set_para_latex_text(para, r"动作 … $(t_{\mathrm{on}},t_{\mathrm{off}})$ …", display=False)
+set_para_latex_text(eq_para, r"$$r_t = w_{\mathrm{pd}}\,\Delta P_{d,t} + \cdots$$", display=True)
+assert not para_has_embedded(para)
+issues = verify_log_section(log_path, word_para_lo=40, word_para_hi=46, min_inline=5)
+```
+
+期刊模板字体/行距若不同，改 `docx_latex_helpers.py` 顶部常量，或从相邻未改段落复制 `w:pPr` 再写 run。
 
 ### Agent 执行清单（门禁）
 
@@ -89,8 +131,8 @@ $$r(t)=\alpha_s\,s_T(t-\tau_s)+\alpha_j\,j(t)+n(t)$$
 3. 改稿脚本若失败（SyntaxError / 编码错误）：**停止**，修好并重跑改稿，禁止接着 convert
 4. `--source` = 干净 LaTeX 主稿；`--target` ≠ source（通常 `*_formula.docx`）
 5. 只用本 skill 目录下 `scripts/convert_docx_latex_to_equations.py`
-6. 看日志：`failed=0`；关注 `unicodeSuspects` / `skipped-unicode-math` / `existingOLE`
-7. 抽查输出：目标节 `dollar=False` 且 display 段 `ole≥1`
+6. 看日志：`failed=0`；**且**改稿小节无 `skipped-existing-object`；**且** `inlineConverted`/`displayConverted` 非异常为 0
+7. 抽查输出：目标节 `dollar=False` 且 display 段 `ole≥1`；**中文 run 仍为模板字体**（非 Calibri 默认）
 
 ### Windows / 工具注意
 
@@ -113,6 +155,6 @@ python scripts/convert_docx_latex_to_equations.py --source input.docx
 
 **Matching order:** display `$$...$$` → explicit inline `$...$` (always convert) → bare `INLINE_PATTERNS`.
 
-**Gate:** After editing the source, verify paragraphs contain real LaTeX (`$$` / `$` / `\alpha`), then convert. Unicode-pasted math is logged as `skipped-unicode-math`. Never convert a document whose body already stores OLE for the sections you still need to change—keep LaTeX in the source and OLE only in `_formula.docx`.
+**Gate:** After editing the source, verify paragraphs contain real LaTeX (`$$` / `$` / `\alpha`), **no stale OLE**, and **restored run/paragraph fonts** (use `docx_latex_helpers.py`). Then convert. Log must show `failed=0` **and** no `skipped-existing-object` in the edited section's Word paragraph index range—not `failed=0` alone when `inlineConverted=0`.
 
 Fallback: `--mathtype-mode word`. Legacy CJK: `-UseLegacy` on `.ps1`.

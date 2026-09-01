@@ -118,6 +118,7 @@ word-latex-mathtype/
 ├── SKILL.md                  ← Cursor Agent Skill instructions
 ├── agents/openai.yaml
 └── scripts/
+    ├── docx_latex_helpers.py                   # safe LaTeX paragraph edit + verify helpers
     ├── setup_environment.ps1
     ├── convert_docx_latex_to_equations.py      # default converter
     ├── convert_docx_latex_to_equations.ps1     # PS wrapper
@@ -176,6 +177,14 @@ That is Unicode/Word-equation paste, not LaTeX. TeX Toggle will not convert it. 
 **Most paragraphs skipped / only a few new formulas convert**
 
 The source was probably merged with a previous `_formula.docx` (OLE already present). Keep the editable master as LaTeX-only; write MathType output only to `*_formula.docx`.
+
+**`failed=0` but edited section still shows `$...$` or wrong fonts**
+
+Two common causes: (1) paragraph still has stale OLE because only `run.text` was changed — use `docx_latex_helpers.set_para_latex_text` to clear objects and restore fonts; (2) log shows `skipped-existing-object` for that section's Word paragraph indices — conversion never ran on those paragraphs. Check `inlineConverted`/`displayConverted`, not `failed` alone.
+
+**Body text became Calibri / lost first-line indent after agent edit**
+
+Bare `OxmlElement('w:r')` or `runs[0].text = ...` drops `w:rFonts` and may ignore `w:pPr`. Always call `set_run_fonts` + `set_body_para_format` (or copy typography from a neighboring unchanged paragraph).
 
 **Formulas not detected**
 
