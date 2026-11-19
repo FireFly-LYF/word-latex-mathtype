@@ -4,20 +4,21 @@
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6)](https://www.microsoft.com/windows)
 [![Python 3](https://img.shields.io/badge/Python-3.10%2B-3776AB)](https://www.python.org/)
 
-**Headless batch conversion** of LaTeX formula text in Word `.docx` files to **MathType OLE** objects on Windows — without opening the MathType GUI.
+**Headless batch conversion** of LaTeX text **or Word/WPS OMath equations** in `.docx` files to **MathType OLE** objects on Windows — without opening the MathType GUI.
 
-在 Windows 上把 Word 文档里的 LaTeX 公式文本**批量、后台**转换为 **MathType 可编辑对象**，不弹出 MathType 窗口（无广告干扰），适合论文/报告自动化排版。
+在 Windows 上把 Word 文档里的 LaTeX 文本或 **Word/WPS 公式编辑器对象**批量、后台转换为 **MathType 可编辑对象**，不弹出 MathType 窗口，适合论文/报告自动化排版。
 
 ---
 
 ## Features
 
-- Silent Word automation: `WINWORD.EXE docx /q` + Python `win32com`
+- Silent Word automation: `WINWORD.EXE /q` + Python `win32com`
 - MathType via **TeX Toggle** (`MTCommand_TeXToggle`) — no GUI, no manual close
 - Produces `Equation.DSMT4` OLE with **DSMT7** payload (compatible with manual MathType equations)
+- **Word/WPS OMath → MathType** via OMML→LaTeX→TeX Toggle (`--source-mode omath`)
 - Display + inline LaTeX detection: prefers explicit `$...$` / `$$...$$`, then conservative bare heuristics
 - Strips leftover `$` delimiters after TeX toggle (inline and display)
-- Automatic fallback to **Word native OMath** when MathType toggle fails
+- Automatic fallback to **Word native OMath** when MathType toggle fails (latex path)
 - JSON conversion log for auditing
 - Optional **Cursor Agent Skill** (`SKILL.md`) for AI-assisted workflows
 
@@ -30,6 +31,7 @@
 | MathType Word add-in | Yes (for `--mathtype-mode toggle`) |
 | Python 3.10+ | Yes |
 | pywin32 | Yes (`pip install pywin32`) |
+| lxml + pandoc | Yes for `--source-mode omath` / `auto` |
 
 > **Do not** use `InsertInlineEqn` / `InsertDispEqn` for batch jobs — they open interactive MathType windows (ads, dialogs) and break unattended automation.
 
@@ -62,40 +64,49 @@ Word OMath only (no MathType):
 python .\scripts\convert_docx_latex_to_equations.py --source input.docx --mathtype-mode word
 ```
 
+Word/WPS equation objects → MathType:
+
+```powershell
+python .\scripts\convert_docx_omath_to_mathtype.py --source input.docx
+# or
+python .\scripts\convert_docx_latex_to_equations.py --source input.docx --source-mode omath
+```
+
 ## How it works
 
 ```
-input.docx (LaTeX text in paragraphs)
-        │
-        ▼
-  WINWORD.EXE /q          ← Word runs headless
-        │
-        ▼
-  Python win32com dynamic   ← avoids PowerShell TYPE_E_CANTLOADLIBRARY
-        │
-        ▼
-  Wrap: $inline$ / $$display$$
-        │
-        ▼
-  MTCommand_TeXToggle       ← MathType OLE, no GUI
-        │
-        ├─ success → Equation.DSMT4 OLE
-        └─ failure → Word OMath fallback
-        │
-        ▼
-  output_formula.docx + output_formula_log.json
+input.docx
+  ├─ LaTeX text ($...$ / $$...$$)
+  │     → wrap → MTCommand_TeXToggle → Equation.DSMT4
+  └─ Word/WPS OMath (OMML)
+        → OOXML rewrite to $latex$
+        → TeX Toggle at document end
+        → Copy OLE → Paste over original span
+        → Equation.DSMT4
+```
+
+```
+WINWORD.EXE /q → Python win32com → TeX Toggle (no MathType GUI)
+     ├─ success → Equation.DSMT4 OLE
+     └─ latex-path failure → Word OMath fallback
+→ output_formula.docx + JSON log
 ```
 
 ## CLI reference
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--source` | (required) | Source `.docx` with LaTeX text |
+| `--source` | (required) | Source `.docx` |
 | `--target` | `<source>_formula.docx` | Output path |
 | `--log` | `<source>_formula_log.json` | JSON log |
+| `--source-mode` | `latex` | `latex` / `omath` / `auto` |
+| `--toggle-strategy` | `auto` | `auto` / `in-place` / `end-paste` |
+| `--fallback` | `none` | `none` (fail) / `word` (OMath fallback) |
 | `--mathtype-mode` | `toggle` | `toggle` = MathType OLE; `word` = OMath only |
 | `--word-exe` | auto-detect | Path to `WINWORD.EXE` |
 | `--open-wait-sec` | `5` | Seconds to wait after CLI open |
+| `--omml2mml-xsl` | auto-detect | Office `OMML2MML.XSL` (omath/auto) |
+| `--pandoc-exe` | `pandoc` on PATH | pandoc binary (omath/auto) |
 
 ## Log summary fields
 
@@ -120,11 +131,14 @@ word-latex-mathtype/
 └── scripts/
     ├── docx_latex_helpers.py                   # safe LaTeX paragraph edit + verify helpers
     ├── setup_environment.ps1
-    ├── convert_docx_latex_to_equations.py      # default converter
+    ├── convert_docx_latex_to_equations.py      # default converter (--source-mode)
+    ├── convert_docx_omath_to_mathtype.py       # Word/WPS OMath → MathType
+    ├── omath_to_latex.py                       # OMML → LaTeX helper
+    ├── word_com_utils.py                       # PID-safe Word + end-toggle pasteback
+    ├── verify_formula_docx.py                  # post-convert gates
     ├── convert_docx_latex_to_equations.ps1     # PS wrapper
     └── convert_docx_latex_to_equations_legacy.ps1  # legacy PS COM (CJK edge cases)
 ```
-
 ## Use as a Cursor Skill
 
 Copy or clone this repo into your Cursor skills folder, e.g.:
@@ -215,4 +229,4 @@ Issues and pull requests welcome at [github.com/FireFly-LYF/word-latex-mathtype]
 
 ## 中文简要说明
 
-本工具通过 Word 后台 **TeX Toggle** 将 docx 中的 LaTeX 文本转为 MathType OLE，**不打开 MathType 界面**，适合批量处理论文公式。安装依赖后运行 `convert_docx_latex_to_equations.py` 即可。开源协议：MIT。
+本工具通过 Word 后台 **TeX Toggle** 将 docx 中的 LaTeX 文本或 Word/WPS 公式（OMath）转为 MathType OLE，**不打开 MathType 界面**，适合批量处理论文公式。OMath 路径：`convert_docx_omath_to_mathtype.py` 或 `--source-mode omath`。开源协议：MIT。

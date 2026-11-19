@@ -138,9 +138,23 @@ def get_paragraph_body(paragraph) -> str:
     return re.sub(r"(\r|\a)+$", "", paragraph.Range.Text)
 
 
+def has_delimited_math(text: str) -> bool:
+    r"""True if author-marked $...$ / $$...$$ / \(...\) / \[...\] is present."""
+    if not text:
+        return False
+    if "$$" in text or r"\[" in text or r"\(" in text:
+        return True
+    # Inline $...$ (not $$); allow simple identifiers like $i$, $N$.
+    return bool(re.search(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", text))
+
+
 def has_formula_signature(text: str) -> bool:
     if not text or not text.strip():
         return False
+    # Author-delimited math always counts — including bare $i$ / $N$ in CJK prose.
+    # Without this gate, the main loop silently skips those paragraphs (no log event).
+    if has_delimited_math(text):
+        return True
     return bool(
         re.search(r"\\[A-Za-z]+", text)
         or re.search(r"_[{A-Za-z0-9]", text)
@@ -402,26 +416,17 @@ def try_convert_range_with_word_equation(doc_range, formula: str) -> dict:
 
 
 def open_word_document(doc_path: Path, word_exe: Path, *, open_wait_sec: float = 5.0):
-    """Open docx through WINWORD.EXE /q, attach COM headlessly."""
-    doc_path = doc_path.resolve()
-    subprocess.Popen([str(word_exe), str(doc_path), "/q"], close_fds=True)
-    time.sleep(open_wait_sec)
-    pythoncom.CoInitialize()
-    word = win32com.client.dynamic.Dispatch("Word.Application")
-    try:
-        word.Visible = False
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        word.DisplayAlerts = 0
-    except Exception:  # noqa: BLE001
-        pass
-    return word, word.ActiveDocument
+    """Open docx through WINWORD.EXE /q, attach COM headlessly (tracks PID)."""
+    from word_com_utils import open_word_document as _open
+
+    return _open(doc_path, word_exe, open_wait_sec=open_wait_sec)
 
 
-def kill_office_processes() -> None:
-    subprocess.run(["taskkill", "/IM", "MathType.exe", "/F"], check=False, capture_output=True)
-    subprocess.run(["taskkill", "/IM", "WINWORD.EXE", "/F"], check=False, capture_output=True)
+def kill_office_processes(*, force_all: bool = False) -> None:
+    """Kill MathType; kill only managed WINWORD PIDs unless ``force_all``."""
+    from word_com_utils import kill_office_processes as _kill
+
+    _kill(force_all=force_all)
 
 
 def assert_file_is_closed(path: Path, label: str) -> None:
@@ -443,7 +448,16 @@ def convert_docx(
     open_wait_sec: float = 5.0,
     prefer_word: bool = False,
     mathtype_mode: str = "toggle",
+    source_mode: str = "latex",
+    toggle_strategy: str = "auto",
+    fallback: str = "none",
+    omml2mml_xsl: Path | None = None,
+    pandoc_exe: str | None = None,
+    formula_scope: str = "all",
+    mathtype_numbers: bool = True,
 ) -> dict:
+    from word_com_utils import normalize_formula_scope
+
     assert_file_is_closed(target, "Target document")
     if target.exists():
         target.unlink()
@@ -453,15 +467,57 @@ def convert_docx(
         mathtype_mode = "word"
     if mathtype_mode not in {"toggle", "word"}:
         raise ValueError(f"Unsupported mathtype_mode: {mathtype_mode!r}. Use 'toggle' or 'word'.")
+    if source_mode not in {"auto", "latex", "omath"}:
+        raise ValueError(f"Unsupported source_mode: {source_mode!r}. Use auto|latex|omath.")
+    if toggle_strategy not in {"auto", "in-place", "end-paste"}:
+        raise ValueError(f"Unsupported toggle_strategy: {toggle_strategy!r}.")
+    if fallback not in {"none", "word"}:
+        raise ValueError(f"Unsupported fallback: {fallback!r}. Use none|word.")
+    scope = normalize_formula_scope(formula_scope)
 
-    kill_office_processes()
+    if source_mode == "omath" and mathtype_mode == "toggle":
+        from convert_docx_omath_to_mathtype import convert_docx_omath
+
+        return convert_docx_omath(
+            source,
+            target,
+            log_path,
+            word_exe=word_exe,
+            open_wait_sec=open_wait_sec,
+            omml2mml_xsl=omml2mml_xsl,
+            pandoc_exe=pandoc_exe,
+            mathtype_numbers=mathtype_numbers,
+            formula_scope=scope,
+        )
+
+    omath_rewrite_stats = None
+    if source_mode == "auto" and mathtype_mode == "toggle":
+        from convert_docx_omath_to_mathtype import rewrite_omath_to_latex_dollars
+
+        omath_rewrite_stats = rewrite_omath_to_latex_dollars(
+            target,
+            xsl_path=omml2mml_xsl,
+            pandoc_exe=pandoc_exe,
+            formula_scope=scope,
+        )
+
+    kill_office_processes(force_all=False)
 
     word_path = resolve_word_executable(word_exe)
+    effective_strategy = toggle_strategy
+    if source_mode == "auto" and toggle_strategy == "auto":
+        effective_strategy = "end-paste"
+
     summary = {
         "source": str(source.resolve()),
         "target": str(target.resolve()),
         "engine": "python-win32com-headless-tex-toggle",
         "mathtypeMode": mathtype_mode,
+        "sourceMode": source_mode,
+        "formulaScope": scope,
+        "mathtypeNumbers": bool(mathtype_numbers and scope in {"display", "all"}),
+        "toggleStrategy": effective_strategy,
+        "fallback": fallback,
         "preferWord": mathtype_mode == "word",
         "wordExe": str(word_path),
         "startedAt": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
@@ -471,6 +527,12 @@ def convert_docx(
         "inlineConverted": 0,
         "mathTypeConverted": 0,
         "wordConverted": 0,
+        "omathFound": int((omath_rewrite_stats or {}).get("omathFound", 0)),
+        "omathRewritten": int((omath_rewrite_stats or {}).get("omathRewritten", 0)),
+        "omathConverted": 0,
+        "omathFailed": int((omath_rewrite_stats or {}).get("failed", 0)),
+        "eqnNumbersInserted": 0,
+        "eqnNumbersFailed": 0,
         "skipped": 0,
         "failed": 0,
         "unicodeMathSuspects": 0,
@@ -482,10 +544,57 @@ def convert_docx(
     try:
         summary["totalParagraphs"] = document.Paragraphs.Count
 
+        from word_com_utils import convert_dollars_via_end_toggle, try_end_toggle_one
+
+        if mathtype_mode == "toggle" and effective_strategy == "end-paste":
+            from omath_to_latex import sanitize_mathtype_latex
+
+            dollar_summary, dollar_events = convert_dollars_via_end_toggle(
+                word,
+                document,
+                sanitize=sanitize_mathtype_latex,
+                kind="dollar",
+                mathtype_numbers=mathtype_numbers,
+                formula_scope=scope,
+            )
+            summary["mathTypeConverted"] += int(dollar_summary["converted"])
+            summary["failed"] += int(dollar_summary["failed"])
+            summary["eqnNumbersInserted"] += int(dollar_summary.get("eqnNumbersInserted", 0))
+            summary["eqnNumbersFailed"] += int(dollar_summary.get("eqnNumbersFailed", 0))
+            if source_mode == "auto":
+                summary["omathConverted"] += int(dollar_summary["converted"])
+                summary["omathFailed"] += int(dollar_summary["failed"])
+            for ev in dollar_events:
+                if ev.get("status") == "end-toggle-pasteback":
+                    if ev.get("display"):
+                        summary["displayConverted"] += 1
+                    else:
+                        summary["inlineConverted"] += 1
+            events.extend(dollar_events)
+
         def convert_formula(rng, formula: str, mode: str) -> dict | None:
             if mathtype_mode == "word":
                 return None
-            return try_convert_range_with_mathtype(word, rng, formula, mode)
+            display = mode == "Display"
+            bare = formula.strip().strip("$")
+            if effective_strategy == "end-paste":
+                return try_end_toggle_one(
+                    word, document, int(rng.Start), int(rng.End), bare, display=display
+                )
+            if effective_strategy == "in-place":
+                return try_convert_range_with_mathtype(word, rng, formula, mode)
+            result = try_convert_range_with_mathtype(word, rng, formula, mode)
+            if result and result.get("success"):
+                return result
+            end_result = try_end_toggle_one(
+                word, document, int(rng.Start), int(rng.End), bare, display=display
+            )
+            if end_result.get("success"):
+                end_result["message"] = (
+                    f"In-place failed ({(result or {}).get('message', '')}); end-paste ok."
+                )
+                return end_result
+            return result or end_result
 
         def record_mathtype_success(kind: str, index: int, formula: str, result: dict, status: str) -> None:
             if kind == "display":
@@ -501,6 +610,43 @@ def convert_docx(
                     "status": status,
                     "formula": formula,
                     "message": result["message"],
+                }
+            )
+
+        def apply_fallback_or_fail(kind: str, index: int, formula: str, rng, mt_msg: str) -> None:
+            if fallback == "word":
+                fb = try_convert_range_with_word_equation(rng, formula)
+                if fb.get("success"):
+                    if kind == "display":
+                        try:
+                            rng.Paragraphs(1).Alignment = WD_ALIGN_PARAGRAPH_CENTER
+                        except Exception:  # noqa: BLE001
+                            pass
+                        summary["displayConverted"] += 1
+                    else:
+                        summary["inlineConverted"] += 1
+                    summary["wordConverted"] += 1
+                    events.append(
+                        {
+                            "kind": kind,
+                            "paragraphIndex": index,
+                            "engine": "Word",
+                            "status": "word-omath",
+                            "formula": formula,
+                            "message": fb["message"],
+                        }
+                    )
+                    return
+                mt_msg = f"{fb.get('message', '')} | MathType={mt_msg}"
+            summary["failed"] += 1
+            events.append(
+                {
+                    "kind": kind,
+                    "paragraphIndex": index,
+                    "engine": "none",
+                    "status": "failed",
+                    "formula": formula,
+                    "message": mt_msg,
                 }
             )
 
@@ -542,10 +688,18 @@ def convert_docx(
                 )
                 continue
 
-            if not has_formula_signature(body):
+            if effective_strategy == "end-paste" and ("$" in body):
+                continue
+
+            # Delimited $...$ alone (e.g. CJK + $i$) must still be converted even if
+            # legacy signature heuristics would miss them; keep both checks.
+            inline_matches = get_inline_formula_matches(body)
+            if not has_formula_signature(body) and not inline_matches:
                 continue
 
             if is_display_formula_paragraph(body):
+                if scope == "inline":
+                    continue
                 formula = normalize_formula_text(body)
                 if is_ascii_identifier_like(formula):
                     summary["skipped"] += 1
@@ -562,47 +716,28 @@ def convert_docx(
 
                 rng = document.Range(paragraph.Range.Start, paragraph.Range.Start + len(body))
                 result = convert_formula(rng, formula, "Display")
-
                 if result and result.get("success"):
-                    paragraph.Alignment = WD_ALIGN_PARAGRAPH_CENTER
+                    try:
+                        paragraph.Alignment = WD_ALIGN_PARAGRAPH_CENTER
+                    except Exception:  # noqa: BLE001
+                        pass
                     record_mathtype_success("display", index, formula, result, "display-mathtype")
                     continue
 
                 mt_msg = result["message"] if result else "MathType not attempted."
-                end = result["range_end"] if result else paragraph.Range.Start + len(formula)
+                end = (
+                    result["range_end"]
+                    if result and "range_end" in result
+                    else paragraph.Range.Start + len(body)
+                )
                 rng = document.Range(paragraph.Range.Start, end)
-                fallback = try_convert_range_with_word_equation(rng, formula)
-                if fallback.get("success"):
-                    paragraph.Alignment = WD_ALIGN_PARAGRAPH_CENTER
-                    summary["displayConverted"] += 1
-                    summary["wordConverted"] += 1
-                    events.append(
-                        {
-                            "kind": "display",
-                            "paragraphIndex": index,
-                            "engine": "Word",
-                            "status": "word-omath",
-                            "formula": formula,
-                            "message": fallback["message"],
-                        }
-                    )
-                else:
-                    restore = document.Range(paragraph.Range.Start, paragraph.Range.End - 1)
-                    restore.Text = formula
-                    summary["failed"] += 1
-                    events.append(
-                        {
-                            "kind": "display",
-                            "paragraphIndex": index,
-                            "engine": "none",
-                            "status": "failed",
-                            "formula": formula,
-                            "message": f"{fallback.get('message', '')} | MathType={mt_msg}",
-                        }
-                    )
+                apply_fallback_or_fail("display", index, formula, rng, mt_msg)
                 continue
 
-            matches = get_inline_formula_matches(body)
+            if scope == "display":
+                continue
+
+            matches = inline_matches
             if not matches:
                 continue
 
@@ -620,45 +755,62 @@ def convert_docx(
                         }
                     )
                     continue
+                if effective_strategy == "end-paste" and match.get("delimited"):
+                    continue
 
                 start = paragraph.Range.Start + match["start"]
                 rng = document.Range(start, start + match["length"])
                 result = convert_formula(rng, formula, "Inline")
-
                 if result and result.get("success"):
                     record_mathtype_success("inline", index, formula, result, "inline-mathtype")
                     continue
 
                 mt_msg = result["message"] if result else "MathType not attempted."
-                end = result["range_end"] if result else start + len(formula)
+                end = (
+                    result["range_end"]
+                    if result and "range_end" in result
+                    else start + match["length"]
+                )
                 rng = document.Range(start, end)
-                fallback = try_convert_range_with_word_equation(rng, formula)
-                if fallback.get("success"):
-                    summary["inlineConverted"] += 1
-                    summary["wordConverted"] += 1
-                    events.append(
-                        {
-                            "kind": "inline",
-                            "paragraphIndex": index,
-                            "engine": "Word",
-                            "status": "word-omath",
-                            "formula": formula,
-                            "message": fallback["message"],
-                        }
-                    )
-                else:
-                    rng.Text = formula
-                    summary["failed"] += 1
-                    events.append(
-                        {
-                            "kind": "inline",
-                            "paragraphIndex": index,
-                            "engine": "none",
-                            "status": "failed",
-                            "formula": formula,
-                            "message": f"{fallback.get('message', '')} | MathType={mt_msg}",
-                        }
-                    )
+                apply_fallback_or_fail("inline", index, formula, rng, mt_msg)
+
+        # Post-pass: MathType right numbers after in-place / auto fallback path.
+        # end-paste already numbers inside convert_dollars_via_end_toggle; this covers
+        # in-place TeX toggle which previously left eqnNumbersInserted=0.
+        if (
+            mathtype_mode == "toggle"
+            and bool(mathtype_numbers)
+            and scope in {"display", "all"}
+            and int(summary.get("eqnNumbersInserted", 0)) == 0
+            and int(summary.get("mathTypeConverted", 0)) > 0
+        ):
+            try:
+                from word_com_utils import insert_mathtype_numbers_for_lone_displays
+
+                num_summary = insert_mathtype_numbers_for_lone_displays(word, document)
+                summary["eqnNumbersInserted"] = int(num_summary.get("inserted", 0))
+                summary["eqnNumbersFailed"] = int(num_summary.get("failed", 0))
+                events.append(
+                    {
+                        "kind": "paragraph",
+                        "engine": "MathType",
+                        "status": "inplace-lone-display-numbers",
+                        "message": (
+                            f"Post-pass InsertEqnNum: inserted={summary['eqnNumbersInserted']} "
+                            f"failed={summary['eqnNumbersFailed']} skipped={num_summary.get('skipped', 0)}"
+                        ),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                summary["eqnNumbersFailed"] = int(summary.get("eqnNumbersFailed", 0)) + 1
+                events.append(
+                    {
+                        "kind": "paragraph",
+                        "engine": "none",
+                        "status": "inplace-numbers-failed",
+                        "message": str(exc),
+                    }
+                )
 
         document.Save()
     finally:
@@ -670,7 +822,7 @@ def convert_docx(
             word.Quit()
         except Exception:  # noqa: BLE001
             pass
-        kill_office_processes()
+        kill_office_processes(force_all=False)
 
     summary["finishedAt"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     output = {"summary": summary, "events": events}
@@ -699,6 +851,53 @@ def main(argv: list[str] | None = None) -> int:
         default="toggle",
         help="toggle = headless MathType TeX toggle (default); word = OMath only.",
     )
+    parser.add_argument(
+        "--source-mode",
+        choices=("auto", "latex", "omath"),
+        default="latex",
+        help=(
+            "latex = LaTeX text only (default); "
+            "omath = Word/WPS OMML only; "
+            "auto = rewrite OMath then convert all $...$ (end-paste) + bare heuristics."
+        ),
+    )
+    parser.add_argument(
+        "--toggle-strategy",
+        choices=("auto", "in-place", "end-paste"),
+        default="auto",
+        help=(
+            "auto = try in-place then end-paste (latex); "
+            "end-paste = thesis-safe (forced for source-mode auto); "
+            "in-place = legacy TeX toggle at formula location."
+        ),
+    )
+    parser.add_argument(
+        "--fallback",
+        choices=("none", "word"),
+        default="none",
+        help="none = fail if MathType fails (default); word = fall back to Word OMath.",
+    )
+    parser.add_argument("--omml2mml-xsl", type=Path, help="Path to OMML2MML.XSL (omath/auto)")
+    parser.add_argument("--pandoc-exe", type=str, help="Path to pandoc (omath/auto)")
+    parser.add_argument(
+        "--formula-scope",
+        choices=("all", "inline", "display"),
+        default="all",
+        help="all=段内+单行; inline=仅段内 $...$; display=仅单行 $$...$$(可右编号).",
+    )
+    parser.add_argument(
+        "--mathtype-numbers",
+        dest="mathtype_numbers",
+        action="store_true",
+        default=True,
+        help="For display formulas, insert MathType right numbers (default on).",
+    )
+    parser.add_argument(
+        "--no-mathtype-numbers",
+        dest="mathtype_numbers",
+        action="store_false",
+        help="Do not insert MathType equation numbers.",
+    )
     args = parser.parse_args(argv)
 
     source = args.source.resolve()
@@ -720,10 +919,22 @@ def main(argv: list[str] | None = None) -> int:
         open_wait_sec=args.open_wait_sec,
         prefer_word=args.prefer_word,
         mathtype_mode=args.mathtype_mode,
+        source_mode=args.source_mode,
+        toggle_strategy=args.toggle_strategy,
+        fallback=args.fallback,
+        omml2mml_xsl=args.omml2mml_xsl,
+        pandoc_exe=args.pandoc_exe,
+        formula_scope=args.formula_scope,
+        mathtype_numbers=args.mathtype_numbers,
     )
     s = result["summary"]
     print(
-        f"mode={s.get('mathtypeMode', '?')} display={s['displayConverted']} inline={s['inlineConverted']} "
+        f"sourceMode={s.get('sourceMode', '?')} scope={s.get('formulaScope', '?')} "
+        f"strategy={s.get('toggleStrategy', '?')} "
+        f"fallback={s.get('fallback', '?')} mode={s.get('mathtypeMode', '?')} "
+        f"display={s['displayConverted']} inline={s['inlineConverted']} "
+        f"omath={s.get('omathConverted', 0)}/{s.get('omathFound', 0)} "
+        f"eqnNum={s.get('eqnNumbersInserted', 0)} "
         f"mathtype={s['mathTypeConverted']} word={s['wordConverted']} "
         f"skipped={s['skipped']} failed={s['failed']} "
         f"unicodeSuspects={s.get('unicodeMathSuspects', 0)} "

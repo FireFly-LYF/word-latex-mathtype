@@ -4,7 +4,7 @@
 Use when an agent rewrites manuscript paragraphs: clear stale OLE/OMath,
 restore body/display typography, then run convert_docx_latex_to_equations.py.
 
-Journal defaults below match typical Chinese IMRaD Word templates (ËÎÌå/TNR ÎåºÅ).
+Journal defaults below match typical Chinese IMRaD Word templates (ï¿½ï¿½ï¿½ï¿½/TNR ï¿½ï¿½ï¿½).
 Override constants for other venues.
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ from docx.shared import Cm, Pt
 SONG = "\u5b8b\u4f53"
 TIMES = "Times New Roman"
 SZ_BODY = 10.5
-LINE_BODY = 15.6
+LINE_BODY_MULTIPLE = 1.5  # match Chinese thesis / MathType (never EXACTLY 15.6pt â€” clips OLE)
 FIRST_INDENT_CM = 0.74
 
 EMBED_TAGS = (
@@ -47,8 +47,9 @@ def set_run_fonts(run, *, east_asia: str = SONG, ascii_font: str = TIMES, size_p
 
 def set_body_para_format(para) -> None:
     pf = para.paragraph_format
-    pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-    pf.line_spacing = Pt(LINE_BODY)
+    # 1.5 multiple: EXACTLY 15.6pt clips tall MathType OLE and looks cramped vs thesis drafts.
+    pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
+    pf.line_spacing = LINE_BODY_MULTIPLE
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
     pf.first_line_indent = Cm(FIRST_INDENT_CM)
@@ -57,12 +58,13 @@ def set_body_para_format(para) -> None:
 
 def set_display_para_format(para) -> None:
     pf = para.paragraph_format
-    pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
-    pf.line_spacing = Pt(LINE_BODY)
+    pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
+    pf.line_spacing = LINE_BODY_MULTIPLE
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
     pf.first_line_indent = None
-    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # Leave LEFT for end-paste TAB+OLE+TAB+(n) right-number layout; converter recenters via tabs.
+    para.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
 
 def clear_para_content(para) -> None:

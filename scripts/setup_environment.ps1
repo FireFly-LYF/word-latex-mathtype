@@ -186,7 +186,9 @@ function Get-MathTypeInfo {
         'C:\Program Files (x86)\MathType\MathType.exe',
         'C:\Program Files\MathType\MathType.exe',
         'C:\Program Files\WIRIS\MathType\MathType.exe',
-        'D:\MathType\MathType.exe'
+        'D:\MathType\MathType.exe',
+        'E:\MathType\MathType\MathType.exe',
+        'E:\Mathtype\MathType\MathType.exe'
     )
 
     $exePath = $null
@@ -226,9 +228,21 @@ $python = Ensure-WingetPackage -Id 'Python.Python.3.12' -DisplayName 'Python 3.1
 )
 $pythonYaml = Ensure-PythonModule -PythonPath $python.path -ModuleName 'yaml' -PackageName 'PyYAML'
 $pythonWin32 = Ensure-PythonModule -PythonPath $python.path -ModuleName 'win32com' -PackageName 'pywin32'
+$pythonLxml = Ensure-PythonModule -PythonPath $python.path -ModuleName 'lxml' -PackageName 'lxml'
+$pythonDocx = Ensure-PythonModule -PythonPath $python.path -ModuleName 'docx' -PackageName 'python-docx'
+
+$pandoc = Ensure-WingetPackage -Id 'JohnMacFarlane.Pandoc' -DisplayName 'Pandoc' -CommandNames @('pandoc', 'pandoc.exe') -CandidatePaths @(
+    'C:\Program Files\Pandoc\pandoc.exe',
+    'D:\DeepLearning\Anaconda\Scripts\pandoc.exe'
+)
 
 $wordPath = Get-WordInstallPath
 $mathType = Get-MathTypeInfo
+
+$omml2mml = @(
+    'C:\Program Files\Microsoft Office\root\Office16\OMML2MML.XSL',
+    'C:\Program Files (x86)\Microsoft Office\root\Office16\OMML2MML.XSL'
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
 if ($null -eq $wordPath) {
     throw 'Microsoft Word was not found. Install Word before using this skill.'
@@ -238,12 +252,24 @@ if (-not $mathType.installed) {
     Write-Warning 'MathType was not found. Conversion can still run with native Word equations, but MathType-first conversion will be unavailable.'
 }
 
+if (-not $pandoc.installed) {
+    Write-Warning 'Pandoc was not found. OMath→MathType (--source-mode omath/auto) will be unavailable until pandoc is on PATH.'
+}
+
+if ([string]::IsNullOrWhiteSpace($omml2mml)) {
+    Write-Warning 'OMML2MML.XSL was not found under Office16. OMath→LaTeX rewrite may fail.'
+}
+
 [pscustomobject]@{
     python = $python
     pythonModules = [pscustomobject]@{
         yaml = $pythonYaml
         pywin32 = $pythonWin32
+        lxml = $pythonLxml
+        docx = $pythonDocx
     }
+    pandoc = $pandoc
+    omml2mmlXsl = $omml2mml
     word = [pscustomobject]@{
         installed = $true
         path = $wordPath
