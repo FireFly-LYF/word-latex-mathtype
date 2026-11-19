@@ -21,7 +21,10 @@ from docx.shared import Cm, Pt
 SONG = "\u5b8b\u4f53"
 TIMES = "Times New Roman"
 SZ_BODY = 10.5
-LINE_BODY_MULTIPLE = 1.5  # match Chinese thesis / MathType (never EXACTLY 15.6pt — clips OLE)
+# Body prose: keep journal fixed spacing (do NOT blanket-apply 1.5 to all text).
+LINE_BODY_PT = 15.6
+# Display (lone $$...$$ / MathType) only: multiple spacing so tall OLE is not clipped.
+LINE_DISPLAY_MULTIPLE = 1.5
 FIRST_INDENT_CM = 0.74
 
 EMBED_TAGS = (
@@ -46,10 +49,10 @@ def set_run_fonts(run, *, east_asia: str = SONG, ascii_font: str = TIMES, size_p
 
 
 def set_body_para_format(para) -> None:
+    """Body / inline-host prose only — preserve typical fixed journal line spacing."""
     pf = para.paragraph_format
-    # 1.5 multiple: EXACTLY 15.6pt clips tall MathType OLE and looks cramped vs thesis drafts.
-    pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
-    pf.line_spacing = LINE_BODY_MULTIPLE
+    pf.line_spacing_rule = WD_LINE_SPACING.EXACTLY
+    pf.line_spacing = Pt(LINE_BODY_PT)
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
     pf.first_line_indent = Cm(FIRST_INDENT_CM)
@@ -57,9 +60,11 @@ def set_body_para_format(para) -> None:
 
 
 def set_display_para_format(para) -> None:
+    """Lone display formula line only — looser spacing; do not change body prose."""
     pf = para.paragraph_format
+    # EXACTLY 15.6pt clips tall MathType OLE; only apply MULTIPLE on display rows.
     pf.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
-    pf.line_spacing = LINE_BODY_MULTIPLE
+    pf.line_spacing = LINE_DISPLAY_MULTIPLE
     pf.space_before = Pt(0)
     pf.space_after = Pt(0)
     pf.first_line_indent = None

@@ -144,7 +144,7 @@ $$r(t)=\alpha_s\,s_T(t-\tau_s)+\alpha_j\,j(t)+n(t)$$
 | `failed=0` **但新段公式仍是** `$...$` **文本** | 段内**残留 OLE**（只改了 `run.text` 未删 `w:object`）；或 `display=0 inline=0` 全篇已是 OLE 壳 | 改稿用 `clear_para_content` **+ 新 run + 字体/段落格式**（见下）；日志查 `skipped-existing-object` 是否落在你改的小节 |
 | **改完 1.3 节字体变 Calibri / 无缩进**         | 用 `OxmlElement('w:r')` 或只写 `runs[0].text` 未恢复 **w:rPr / w:pPr**              | 改稿后必须 `set_run_fonts` **+** `set_body_para_format`；display 段用 `set_display_para_format`    |
 | 动作空间整段跳过、末尾残 `0,1`                    | 该段已有 InlineShapes，转换器整段 skip                                                 | 改稿前 `para_has_embedded` 必须为 False                                                          |
-| **display 行距过紧 / 公式被裁切** | `set_*_para_format` 曾用 `EXACTLY 15.6pt` | 改为 `MULTIPLE 1.5`；display 源段勿强制居中（右编号靠 end-paste 制表位） |
+| **display 行距过紧 / 公式被裁切** | display 段误用正文 `EXACTLY 15.6pt` | **只改公式行**：`set_display_para_format`→`MULTIPLE 1.5`；`set_body_para_format` 保持正文原固定行距 |
 | **公式旁残留红字** `\lvert`/`\rvert`/`\dfrac` | MathType TeX Toggle 不完全支持这些宏 | 源稿改写为 `\left|...\right|`、`\frac`；转换后肉眼查 PNG |
 | **`mathtypeNumbers=true` 但 eqnNumbers=0** | 旧版 in-place 不跑编号；或 end-paste 后 lone-display 因字段符误判失败 | 优先 `--toggle-strategy end-paste`；convert 结束若仍为 0 再跑编号 pass；字段符须计入 lone-display |
 | **end-paste 后 OLE 旁残留** `$$...$$` | `Range.Paste()` 未删除选区原文 | 先清空 Range 再粘贴；display 段 `_scrub_residual_dollar_text` |
@@ -192,7 +192,7 @@ assert not para_has_embedded(para)
 issues = verify_log_section(log_path, word_para_lo=40, word_para_hi=46, min_inline=5)
 ```
 
-期刊模板字体/行距若不同，改 `docx_latex_helpers.py` 顶部常量，或从相邻未改段落复制 `w:pPr` 再写 run。
+期刊模板字体/行距若不同，改 `docx_latex_helpers.py` 顶部常量，或从相邻未改段落复制 `w:pPr` 再写 run。**行距原则**：正文/`set_body_para_format` 不强制 1.5；仅独立公式行/`set_display_para_format` 用 `MULTIPLE 1.5` 避免 OLE 裁切。
 
 ### Agent 执行清单（门禁）
 
@@ -216,7 +216,7 @@ issues = verify_log_section(log_path, word_para_lo=40, word_para_hi=46, min_inli
 一次完整 latex→MathType 过程中连续踩到的坑（均已修脚本/文档）：
 
 1. **裸 `$i$` 静默跳过**：`has_formula_signature` 不认无 `_`/`\` 的定界公式 → 加 `has_delimited_math`
-2. **行距 EXACTLY 15.6pt 裁切 OLE** → helpers 改为 `MULTIPLE 1.5`；display 源段左对齐留给制表位
+2. **行距 EXACTLY 15.6pt 裁切 OLE** → **仅公式行** `MULTIPLE 1.5`，正文保持原固定行距；display 源段左对齐留给制表位
 3. **`\lvert`/`\dfrac` 转换残字** → 源稿只用 `\left|...\right|`、`\frac`
 4. **end-paste 后 OLE 旁残留 `$$...$$`** → 粘贴前清空 Range + scrub
 5. **编号不贴右 / 公式不居中**：`InsertEqnNum` 后的字段符让 lone-display 误判，跳过 `TAB+OLE+TAB+(n)` → 字段符计入 lone-display；布局后肉眼确认**公式居中、编号贴右**
